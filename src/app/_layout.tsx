@@ -1,18 +1,28 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { Inter_400Regular, Inter_500Medium } from '@expo-google-fonts/inter';
+import { YoungSerif_400Regular, useFonts } from '@expo-google-fonts/young-serif';
+import { Stack } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { color } from '@/theme/tokens';
 
-SplashScreen.preventAutoHideAsync();
+export default function RootLayout() {
+  const [fonts_loaded] = useFonts({
+    YoungSerif_400Regular,
+    Inter_400Regular,
+    Inter_500Medium,
+  });
+  if (!fonts_loaded) return null;
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <StatusBar style="dark" />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: color.canvas },
+        }}
+      />
+    </GestureHandlerRootView>
   );
 }

@@ -6,6 +6,7 @@ node_modules/
 # Expo
 .expo/
 dist/
+dist-*/
 web-build/
 expo-env.d.ts
 
@@ -30,7 +31,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# local env files (KEEP .env.example TRACKED — IT HOLDS ONLY PLACEHOLDER NAMES)
+.env
+.env.*
+!.env.example
 .env*.local
 
 # typescript
