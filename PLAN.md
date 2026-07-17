@@ -37,7 +37,7 @@ Block (the atomic unit)
  ├─ booking?: { confirmation_number, provider, cost, attachments[], status }
  ├─ source: manual | parsed_email | ai_suggested | imported
  ├─ is_locked: bool   (locked blocks — flights, reservations — are immovable anchors)
- └─ meta: { transit_to_next, conflict_flags[], weather_sensitive: bool }
+ └─ meta: { transit_to_next, conflict_flags[] }
 ```
 
 ### 2.1.1 Code conventions
@@ -78,7 +78,7 @@ Block (the atomic unit)
 | `brand_text` | `#993C1D` | Secondary text on tints, icon buttons |
 | `brand_ink` | `#4A1B0C` | Wordmark |
 | `meal` | `#EF9F27` | Meal block edge/pin (amber) |
-| `meal_tint` / `meal_text` | `#FAEEDA` / `#633806` | Warning-ish chips (weather, book-ahead), meal accents |
+| `meal_tint` / `meal_text` | `#FAEEDA` / `#633806` | Warning-ish chips (book-ahead), meal accents |
 | `anchor` | `#0F6E56` (pin `#1D9E75`) | Booked/locked anchors, success moments (green-teal) |
 | `anchor_tint` / `anchor_text` | `#E1F5EE` / `#085041` | "Open now", "Booked", verified chips |
 | `danger` | `#E24B4A` | Infeasible transit connector |
@@ -113,7 +113,7 @@ Rules: one brand accent per screen region; amber/green/red are semantic only (me
 - **Trip calendar row:** 46px date column (weekday over 19px number) · vertical hairline divider · theme title + one meta line · 4px **fullness bar** (`hairline_soft` track, `brand_border` fill; inverted colors on the selected row). Selected day = solid `brand` row with peek chips (`brand_pressed` fill) of its first blocks.
 - **Timeline row:** 44px right-aligned hour rail (11px faint; brand-colored when dragging) · block card with colored left edge · dashed vertical transit connector with walk icon + "12 min · 0.6 mi".
 - **Drag state:** lifted block gets `brand_tint` fill, `brand_border` border, −1.2° tilt, visible grip icon, dashed snap guide line at target time, and a live consequence line ("Snaps to 1:30 · adds 14 min walk").
-- **Status chips:** 11px, 3×9px padding, 10px radius — green tint for open/booked/verified, amber tint for weather/book-ahead, red family for conflicts.
+- **Status chips:** 11px, 3×9px padding, 10px radius — green tint for open/booked/verified, amber tint for book-ahead, red family for conflicts.
 - **Gap affordance:** dashed hairline row, muted "45 min free" left, brand sparkle + label right.
 - **AI grammar:** sparkle icon + terracotta always means "AI can help here"; suggestion sheets lead with a 2px `brand_border` "Best fit" card that states its reasoning in one line; every AI sheet offers "Shelve for later".
 - **Bottom bar:** pill AI ask field (sparkle prefix, faint placeholder) + 42px circular brand FAB for manual quick-add — manual entry always one tap away.
@@ -126,7 +126,6 @@ Rules: one brand accent per screen region; amber/green/red are semantic only (me
 - **Drag mechanics:**
   - Long-press to lift (haptic + scale-up). Timeline auto-scrolls near edges.
   - **Magnetic snapping:** blocks snap to 15-min increments and to the end of the preceding transit block.
-  - **Ripple mode (toggle):** dragging a block optionally pushes subsequent flexible blocks later, preserving gaps — vs. free mode where only the dragged block moves.
   - Resize by dragging the block's bottom edge to change duration; AI shows the *typical visit duration* as a ghost guide ("Most people spend ~2h at the MFA").
 - **Conflict visualization:** overlapping blocks get a red seam; infeasible transit ("you'd need to teleport") draws a dashed red connector with a "Fix it" chip that offers auto-resolutions (shift later, swap order, change transit mode, drop to shelf).
 - **Day map view:** every day has a toggle between timeline and map. The map shows numbered pins in visit order with the route polyline. Dragging pins on the map reorders the timeline (with confirmation).
@@ -162,7 +161,7 @@ The app must be a complete, delightful itinerary builder with the network cable 
 0a. **Block CRUD:** quick-add composer (block_type, title, time, duration, notes), edit, delete, duplicate, move-to-day. Places optional on every block.
 0b. **Manual anchor forms:** flight (with flight-number lookup or pure manual), lodging, train, rental car, reservation — confirmation numbers and attachments included. This is the answer to "I don't have a Delta email."
 0c. **Plain place search:** Mapbox Search Box autocomplete (via the swappable `places_provider` interface) → tap → block with hours/photos/coords attached. Deterministic, no AI ranking.
-0d. **Drag/drop/resize/snap** on the timeline, ripple mode, and the Idea Shelf with drag-to-schedule.
+0d. **Drag/drop/resize/snap** on the timeline, and the Idea Shelf with drag-to-schedule.
 0e. **Undo/redo stack** across all mutations.
 0f. All later features (parsing, AI suggestions, generation) mutate the itinerary exclusively through these same primitives — no parallel code paths.
 
@@ -177,22 +176,20 @@ The app must be a complete, delightful itinerary builder with the network cable 
 
 ### Tier 2 — Fast follow (weeks 6–12)
 
-8. **Weather-aware planning.** Blocks tagged `weather_sensitive` (whale watch, walking tour) get proactive alerts: "Rain forecast Thursday PM — swap the Freedom Trail with Friday's ICA visit?" One-tap day-swap that re-validates hours and transit.
-9. **Pacing engine.** Per-day "intensity score" (hours scheduled, walking miles, back-to-back count). Warn on overpacked days; suggest inserting buffer/meal blocks. Respect the user's pace preference from onboarding.
-10. **Meal-slot intelligence.** Detect missing meals ("No dinner planned Tuesday") and offer suggestions near wherever the user will be at that hour — the proximity model's killer everyday use.
-11. **Reservation & booking status tracking.** "Needs booking" checklist derived from blocks (restaurants that require reservations, timed-entry museums). Deep-link out to OpenTable/venue sites for booking; paste confirmation back in to flip status. (Don't build booking in MVP — link out.)
-12. **Collaborative trips.** Shared trips with real-time sync (Supabase realtime), presence, and a lightweight voting mechanic: shelf cards get 👍/👎 from travelers; AI weighs votes when filling gaps.
-13. **"Day rescue" mode.** In-trip panic button: "Our flight is delayed 3h" / "The museum was closed" → AI re-plans the remainder of the day, preserving anchors and reservations, and shows a diff of changes before applying.
-14. **Budget layer.** Optional cost field per block, per-day and per-trip rollups, and budget-aware suggestions ("keep dinner under $40/pp").
+8. **Pacing engine.** Per-day "intensity score" (hours scheduled, walking miles, back-to-back count). Warn on overpacked days; suggest inserting buffer/meal blocks. Respect the user's pace preference from onboarding.
+10. **Reservation & booking status tracking.** "Needs booking" checklist derived from blocks (restaurants that require reservations, timed-entry museums). Deep-link out to OpenTable/venue sites for booking; paste confirmation back in to flip status. (Don't build booking in MVP — link out.)
+11. **Collaborative trips.** Shared trips with real-time sync (Supabase realtime), presence, and a lightweight voting mechanic: shelf cards get 👍/👎 from travelers; AI weighs votes when filling gaps.
+12. **"Day rescue" mode.** In-trip panic button: "Our flight is delayed 3h" / "The museum was closed" → AI re-plans the remainder of the day, preserving anchors and reservations, and shows a diff of changes before applying.
+13. **Budget layer.** Optional cost field per block, per-day and per-trip rollups, and budget-aware suggestions ("keep dinner under $40/pp").
 
 ### Tier 3 — Differentiators for v1.0+
 
-15. **Timeline "templates" & remixing.** Publish/share an itinerary as a template; another user applies it to their own dates and the app re-validates hours/availability and re-personalizes ("You said no seafood — swapped Neptune Oyster for a North End pasta spot").
-16. **Live day mode.** During the trip, a "Now" line tracks through the timeline; the current block goes full-bleed with directions, confirmation codes, and a "running late" quick action that ripples the schedule.
-17. **Multi-city trips & inter-city legs.** Trains/flights between bases as first-class legs; per-city day grouping.
-18. **Energy/interest balancing.** Avoid three museums in a row; interleave active/passive, indoor/outdoor. Simple heuristic scoring, big perceived-quality win for generated itineraries.
-19. **Post-trip recap.** Auto-generated trip summary (map of everywhere visited, stats, photo slots) — organic sharing = acquisition loop.
-20. **Proactive notifications:** night-before digest ("Tomorrow: 5 stops, 3.1 mi walking, 60% rain after 4 PM — umbrella"), check-in reminders, "leave by" alerts using live transit.
+14. **Timeline "templates" & remixing.** Publish/share an itinerary as a template; another user applies it to their own dates and the app re-validates hours/availability and re-personalizes ("You said no seafood — swapped Neptune Oyster for a North End pasta spot").
+15. **Live day mode.** During the trip, a "Now" line tracks through the timeline; the current block goes full-bleed with directions, confirmation codes, and a "running late" quick action that ripples the schedule.
+16. **Multi-city trips & inter-city legs.** Trains/flights between bases as first-class legs; per-city day grouping.
+17. **Energy/interest balancing.** Avoid three museums in a row; interleave active/passive, indoor/outdoor. Simple heuristic scoring, big perceived-quality win for generated itineraries.
+18. **Post-trip recap.** Auto-generated trip summary (map of everywhere visited, stats, photo slots) — organic sharing = acquisition loop.
+19. **Proactive notifications:** night-before digest ("Tomorrow: 5 stops, 3.1 mi walking"), check-in reminders, "leave by" alerts using live transit.
 
 ---
 
@@ -254,7 +251,7 @@ If Part A alone feels great, the foundation is right; if Part B feels magical on
 | 1 | **Manual core:** data model + vertical timeline in React Native; block CRUD (quick-add composer, edit, delete, duplicate); drag/lift/snap/resize feel perfected on a hardcoded trip |
 | 2 | **Manual core II:** manual anchor forms (flight w/ flight-number lookup, lodging, reservation); Idea Shelf; undo/redo stack; move-to-day |
 | 3 | **Places (non-AI):** autocomplete place search, place cards, hours validation, typical durations; day map view |
-| 4 | **Feasibility engine:** auto transit blocks, conflict detection + fix-it chips, ripple mode — *milestone: Part A of the Boston reference flow passes with zero AI* |
+| 4 | **Feasibility engine:** auto transit blocks, conflict detection + fix-it chips — *milestone: Part A of the Boston reference flow passes with zero AI* |
 | 5 | **AI layer I:** conversational bar + Gap Button (query → structured intent → Places → ranked cards → snap-in via the same manual add primitives) |
 | 6 | **AI layer II:** "Plan it for me" full-trip generation with geographic clustering + feasibility pass |
 | 7 | **Ingestion:** paste-text parsing, forward-email pipeline, screenshot parsing — all landing as ordinary editable blocks; offline caching + sync |

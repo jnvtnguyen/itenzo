@@ -66,6 +66,11 @@ export interface Block {
   // LOCKED BLOCKS (FLIGHTS, RESERVATIONS) ARE IMMOVABLE ANCHORS.
   is_locked: boolean;
   notes?: string;
+  // PER-LEG MODE OVERRIDE (§4 TIER 1.3): FORCES THE MODE OF THE TRANSIT LEG
+  // *LEAVING* THIS BLOCK; UNSET MEANS THE DISTANCE-BASED DEFAULT.
+  transit_mode_override?: TransitMode;
+  // OPTIONAL COST (BUDGET LAYER, §4 TIER 2): WHOLE TRIP CURRENCY, PER BLOCK.
+  cost?: number;
   meta?: {
     transit_to_next?: TransitLeg;
     conflict?: string;
@@ -112,4 +117,6 @@ export interface Trip {
   days: Day[];
   idea_shelf: ShelfItem[];
   preferences?: Preferences;
+  // ISO TIMESTAMP OF THE LAST LOCAL MUTATION — LAST-WRITER-WINS CLOUD SYNC.
+  updated_at?: string;
 }

@@ -1,9 +1,9 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useContext, useRef, useState, type ReactNode } from 'react';
 import {
+  Pressable,
   Text as RNText,
   TextInput as RNTextInput,
   StyleSheet,
-  View,
   type StyleProp,
   type TextInputProps,
   type TextProps,
@@ -39,20 +39,28 @@ export function Text({ style, ...props }: TextProps) {
 }
 
 // FOCUS PLUMBING: A TEXTINPUT INSIDE A FieldCard REPORTS ITS FOCUS UPWARD SO
-// THE CARD'S BORDER — NOT THE RAW INPUT — CARRIES THE FOCUS TREATMENT.
-const FieldFocusContext = createContext<((focused: boolean) => void) | null>(null);
+// THE CARD'S BORDER — NOT THE RAW INPUT — CARRIES THE FOCUS TREATMENT, AND
+// REGISTERS A focus() HANDLE SO TAPPING *ANYWHERE* ON THE CARD (LABEL,
+// PADDING, HINT TEXT) FOCUSES THE INPUT — A BARE INPUT LINE IS A TINY TARGET.
+const FieldFocusContext = createContext<{
+  notify: (focused: boolean) => void;
+  register: (focus: (() => void) | null) => void;
+} | null>(null);
 
 export function TextInput({ style, onFocus, onBlur, ...props }: TextInputProps) {
-  const notify = useContext(FieldFocusContext);
+  const field = useContext(FieldFocusContext);
   return (
     <RNTextInput
       {...props}
+      ref={(input) => {
+        field?.register(input ? () => input.focus() : null);
+      }}
       onFocus={(e) => {
-        notify?.(true);
+        field?.notify(true);
         onFocus?.(e);
       }}
       onBlur={(e) => {
-        notify?.(false);
+        field?.notify(false);
         onBlur?.(e);
       }}
       // KILL THE BROWSER'S NATIVE FOCUS RING ON WEB — FieldCard'S BORDER IS
@@ -79,15 +87,30 @@ export function FieldCard({
   children: ReactNode;
 }) {
   const [focused, set_focused] = useState(false);
-  const handle_focus = (next: boolean) => {
-    set_focused(next);
-    on_focus_change?.(next);
+  // REF WRITES/READS HAPPEN IN REF CALLBACKS AND PRESS HANDLERS (COMMIT/EVENT
+  // TIME), NEVER DURING RENDER.
+  const input_focus = useRef<(() => void) | null>(null);
+  const field_ctx = {
+    notify: (next: boolean) => {
+      set_focused(next);
+      on_focus_change?.(next);
+    },
+    register: (focus: (() => void) | null) => {
+      input_focus.current = focus;
+    },
   };
+  const focus_input = () => input_focus.current?.();
   return (
-    <FieldFocusContext.Provider value={handle_focus}>
-      <View onLayout={on_layout} style={[style, focused && (focus_style ?? styles.focused)]}>
+    <FieldFocusContext.Provider value={field_ctx}>
+      {/* THE WHOLE CARD IS THE TAP TARGET — TAPS THAT MISS THE INPUT ITSELF
+          (EYEBROW, PADDING) STILL FOCUS IT. CHILD PRESSABLES (SUGGESTION
+          ROWS, STEPPERS) STILL WIN THEIR OWN TAPS. */}
+      <Pressable
+        onPress={focus_input}
+        onLayout={on_layout}
+        style={[style, focused && (focus_style ?? styles.focused)]}>
         {children}
-      </View>
+      </Pressable>
     </FieldFocusContext.Provider>
   );
 }

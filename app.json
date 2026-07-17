@@ -44,7 +44,10 @@
         {
           "locationWhenInUsePermission": "Itenzo uses your location to suggest places near you when a trip has no destination set."
         }
-      ]
+      ],
+      "expo-image",
+      "expo-status-bar",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

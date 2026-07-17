@@ -427,7 +427,16 @@ export function BlockCard({
   const extra_parts: string[] = [];
   if (block.place?.name && block.place.name !== block.title) extra_parts.push(block.place.name);
   if (block.booking?.confirmation_number) extra_parts.push(`#${block.booking.confirmation_number}`);
+  if (block.cost != null && block.cost > 0) extra_parts.push(`$${Math.round(block.cost)}`);
   const meta_extra = extra_parts.join(' · ');
+
+  // AN UNBOOKED RESERVATION EARNS THE AMBER "RESERVATION" CHIP EVEN WITHOUT
+  // EXPLICIT META — DERIVED FROM THE BOOKING STATUS, NEVER STORED.
+  const shown_chip =
+    block.meta?.chip ??
+    (block.booking?.status === 'needs_booking'
+      ? { label: 'Reservation', kind: 'meal' as const }
+      : undefined);
 
   return (
     <GestureDetector gesture={pan}>
@@ -506,15 +515,15 @@ export function BlockCard({
                   </Text>
                   {on_fix != null && (
                     <Pressable onPress={on_fix} hitSlop={8} style={styles.fix_pill}>
-                      <Text style={styles.fix_pill_label}>Fix it</Text>
+                      <Text style={styles.fix_pill_label}>Fix</Text>
                     </Pressable>
                   )}
                 </View>
               )}
               {/* THE CONFLICT BAR ALREADY CARRIES THE RED STORY — NO EXTRA CHIP. */}
-              {density === 'full' && block.meta?.chip && !active && conflict == null && (
+              {density === 'full' && shown_chip && !active && conflict == null && (
                 <View style={{ marginTop: 6 }}>
-                  <StatusChip label={block.meta.chip.label} kind={block.meta.chip.kind} />
+                  <StatusChip label={shown_chip.label} kind={shown_chip.kind} />
                 </View>
               )}
             </>

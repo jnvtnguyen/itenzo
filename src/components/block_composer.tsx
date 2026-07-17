@@ -1,15 +1,16 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Keyboard, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Keyboard, Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MapView } from '@/components/map_view';
 import { FieldCard, Text, TextInput } from '@/components/text';
+import { use_keyboard_reveal } from '@/components/use_keyboard_height';
 import { fmt_duration, fmt_time, weekday_long } from '@/model/time';
 import type { Block, BlockType, Day, Place, ShelfItem } from '@/model/types';
-import { flight_lookup } from '@/services/flight_lookup';
+import { flight_lookup, normalize_flight_number } from '@/services/flight_lookup';
 import { fmt_distance_mi, haversine_mi, type LngLat } from '@/services/geo';
 import { check_hours } from '@/services/hours';
 import { categories_for, type PlaceCategory } from '@/services/place_categories';
@@ -60,6 +61,8 @@ const TYPE_OPTIONS: { type: BlockType; label: string; icon: keyof typeof Materia
   { type: 'flight', label: 'Flight', icon: 'airplane' },
   { type: 'lodging', label: 'Stay', icon: 'bed-outline' },
   { type: 'note', label: 'Note', icon: 'note-text-outline' },
+  // BUFFERS ARE DELIBERATE REST — THE PACING ENGINE COUNTS THEM AS DOWNTIME.
+  { type: 'buffer', label: 'Buffer', icon: 'timer-sand' },
 ];
 
 export interface ComposerResult {
@@ -70,6 +73,9 @@ export interface ComposerResult {
   place?: Place;
   notes?: string;
   confirmation_number?: string;
+  cost?: number;
+  needs_booking?: boolean;
+  is_locked: boolean;
 }
 
 interface ComposerProps {
@@ -102,10 +108,13 @@ interface ComposerProps {
 // SUGGESTIONS, GENERATION — ADDS BLOCKS THROUGH THIS SAME SHAPE OF INPUT (§3.3).
 export function BlockComposer(props: ComposerProps) {
   return (
+    // fade, NOT slide: THE SHEET SLIDES ITSELF UP (SEE sheet_ty) WHILE THE
+    // DARK BACKDROP ONLY FADES — animationType="slide" DRAGGED THE BACKDROP
+    // UP WITH THE SHEET, WHICH LOOKED BROKEN.
     <Modal
       visible={props.visible}
       transparent
-      animationType="slide"
+      animationType="fade"
       onRequestClose={props.on_close}>
       <ComposerForm key={props.instance_key} {...props} />
     </Modal>
@@ -135,7 +144,13 @@ function ComposerForm({
   const [block_type, set_block_type] = useState<BlockType>(
     block?.block_type ?? shelf_item?.block_type ?? 'activity',
   );
-  const [title, set_title] = useState(block?.title ?? shelf_item?.title ?? '');
+  // A FLIGHT TITLE THAT MATCHES THE AUTO FORMAT ("DL 1204 · JFK → BOS") ISN'T
+  // TREATED AS HAND-TYPED — THE ROUTE FIELDS KEEP OWNING IT ON EDIT.
+  const auto_flight_title_re = /^(?:[A-Z0-9]{2}\s?\d{1,4} · )?[A-Z]{3}\s*→\s*[A-Z]{3}$/;
+  const [title, set_title] = useState(() => {
+    const initial = block?.title ?? shelf_item?.title ?? '';
+    return block?.block_type === 'flight' && auto_flight_title_re.test(initial) ? '' : initial;
+  });
   const [start_time, set_start_time] = useState(block?.start_time ?? default_start);
   const [duration_min, set_duration_min] = useState(
     block ? block.end_time - block.start_time : (shelf_item?.typical_duration_min ?? 60),
@@ -213,31 +228,10 @@ function ComposerForm({
     ? TYPE_OPTIONS.filter((o) => o.type === 'activity' || o.type === 'meal' || o.type === 'note')
     : TYPE_OPTIONS;
 
-  // WHEN AN INPUT FOCUSES, PIN ITS WHOLE CARD TO THE TOP OF THE FIELD AREA.
-  // automaticallyAdjustKeyboardInsets ALONE ONLY REVEALS THE BARE INPUT LINE,
-  // CLIPPING THE CARD'S BORDER AND PADDING UNDER THE KEYBOARD — THIS SHOWS
-  // THE FULL CARD WITH BREATHING ROOM. THE DELAY WAITS OUT THE KEYBOARD
-  // ANIMATION SO THE SCROLL LANDS ON THE POST-INSET GEOMETRY.
-  const fields_ref = useRef<ScrollView>(null);
-  const card_ys = useRef<Record<string, number>>({});
-  const reveal_field = (key: string) => {
-    setTimeout(() => {
-      const y = card_ys.current[key];
-      if (y != null) fields_ref.current?.scrollTo({ y: Math.max(0, y - 6), animated: true });
-    }, 240);
-  };
-  // THESE CALLBACKS FIRE AT LAYOUT/FOCUS EVENT TIME, NOT DURING RENDER — THE
-  // REFS LINT CAN'T SEE THAT.
-  /* eslint-disable react-hooks/refs */
-  const field_props = (key: string) => ({
-    on_layout: (e: { nativeEvent: { layout: { y: number } } }) => {
-      card_ys.current[key] = e.nativeEvent.layout.y;
-    },
-    on_focus_change: (focused: boolean) => {
-      if (focused) reveal_field(key);
-    },
-  });
-  /* eslint-enable react-hooks/refs */
+  // KEYBOARD STORY (SHARED SHEET PATTERN — SEE use_keyboard_reveal): THE
+  // SHEET NEVER MOVES; THE FIELD AREA GAINS SCROLL RANGE AND FOCUSED INPUTS
+  // SLIDE JUST CLEAR OF THE KEYBOARD.
+  const { keyboard_height, fields_ref, track_scroll, field_props } = use_keyboard_reveal();
 
   // ATTACH A RESOLVED PLACE FROM EITHER PATH (TEXT SUGGESTION OR BROWSE CARD),
   // CLEARING BOTH RESULT LISTS AND PREFILLING A TYPICAL DURATION. PICKING IS
@@ -252,6 +246,16 @@ function ComposerForm({
     if (!duration_touched) {
       set_duration_min(typical_duration_min(resolved.poi_category, block_type));
     }
+  };
+
+  // ONE-TAP CLEAR FOR THE PLACE FIELD — SWAPPING A LOADED PLACE SHOULDN'T
+  // MEAN BACKSPACING THROUGH ITS WHOLE NAME.
+  const clear_place = () => {
+    set_place(null);
+    set_place_query('');
+    set_suggestions([]);
+    set_browse_results([]);
+    set_active_category(null);
   };
 
   const handle_place_query = (value: string) => {
@@ -280,6 +284,9 @@ function ComposerForm({
   };
 
   const toggle_category = async (cat: PlaceCategory) => {
+    // BROWSING IS THE END OF TYPING — PUT THE KEYBOARD AWAY SO THE RESULT
+    // LIST ISN'T HIDING BEHIND IT.
+    Keyboard.dismiss();
     // TAP THE ACTIVE CHIP AGAIN TO COLLAPSE THE BROWSE.
     if (active_category === cat.id) {
       set_active_category(null);
@@ -311,29 +318,69 @@ function ComposerForm({
   const [confirmation_number, set_confirmation_number] = useState(
     block?.booking?.confirmation_number ?? '',
   );
-  const [flight_query, set_flight_query] = useState('');
+  // BUDGET LAYER (§4 TIER 2): FREE-FORM COST TEXT, PARSED ON SAVE.
+  const [cost_text, set_cost_text] = useState(
+    block?.cost != null ? String(block.cost) : '',
+  );
+  // "BOOK AHEAD" — RESERVATION-REQUIRED VENUES GET THE AMBER CHIP AND JOIN
+  // THE NEEDS-BOOKING STORY (§4 TIER 2).
+  const [needs_booking, set_needs_booking] = useState(
+    block?.booking?.status === 'needs_booking',
+  );
+  // FLIGHT ROUTE AS SEPARATE FIELDS ("LAX" → "BOS") — AN EXISTING FLIGHT'S
+  // TITLE ("DL 1204 · JFK → BOS") SEEDS THEM (AND THE NUMBER) BACK ON EDIT.
+  const title_route = (block?.title ?? '').match(/([A-Z]{3})\s*→\s*([A-Z]{3})/);
+  const title_flight_no = (block?.title ?? '').match(/^([A-Z0-9]{2}\s?\d{1,4})\b/);
+  const [flight_from, set_flight_from] = useState(title_route?.[1] ?? '');
+  const [flight_to, set_flight_to] = useState(title_route?.[2] ?? '');
+  const [flight_query, set_flight_query] = useState(
+    block?.block_type === 'flight' ? (title_flight_no?.[1] ?? '') : '',
+  );
   const [lookup_state, set_lookup_state] = useState<'idle' | 'found' | 'missing'>('idle');
 
   const handle_flight_lookup = async () => {
+    Keyboard.dismiss();
     const info = await flight_lookup.lookup(flight_query);
     if (!info) {
       set_lookup_state('missing');
       return;
     }
     set_lookup_state('found');
-    set_title(`${info.flight_number} · ${info.origin} → ${info.destination}`);
+    set_flight_from(info.origin);
+    set_flight_to(info.destination);
     set_start_time(info.departure_time);
     // OVERNIGHT ARRIVALS WRAP PAST MIDNIGHT; KEEP A SANE MINIMUM.
     set_duration_min(Math.max(30, (info.arrival_time - info.departure_time + 1440) % 1440));
   };
 
+  // FLIGHTS TITLE THEMSELVES FROM NUMBER + ROUTE ("DL 1204 · LAX → BOS") —
+  // A HAND-TYPED TITLE STILL WINS.
+  const flight_route =
+    flight_from.trim() && flight_to.trim()
+      ? `${flight_from.trim().toUpperCase()} → ${flight_to.trim().toUpperCase()}`
+      : '';
+  const flight_auto_title =
+    block_type === 'flight'
+      ? [flight_query.trim() ? normalize_flight_number(flight_query) : '', flight_route]
+          .filter((part) => part.length > 0)
+          .join(' · ')
+      : '';
+
   const is_anchor_type = block_type === 'flight' || block_type === 'lodging';
-  const resolved_title = title.trim() || (place?.name ?? place_query.trim());
+  // LOCKED ANCHORS (§2.2): ANY TIMED RESERVATION CAN PIN ITSELF IN PLACE —
+  // FLIGHTS AND STAYS DEFAULT ON, EVERYTHING ELSE OFF; THE TOGGLE OVERRIDES.
+  const [lock_override, set_lock_override] = useState<boolean | null>(null);
+  const locked = lock_override ?? block?.is_locked ?? is_anchor_type;
+  const resolved_title = title.trim() || flight_auto_title || (place?.name ?? place_query.trim());
   const can_submit = resolved_title.length > 0;
 
   // DRAG-TO-DISMISS: A DOWNWARD PAN ON THE SHEET HEADER SLIDES IT AWAY. PAST A
   // DISTANCE/VELOCITY THRESHOLD IT COMMITS TO CLOSING; OTHERWISE IT SPRINGS BACK.
-  const sheet_ty = useSharedValue(0);
+  // STARTS OFF-SCREEN AND SLIDES UP ON MOUNT (THE MODAL ITSELF ONLY FADES).
+  const sheet_ty = useSharedValue(900);
+  useEffect(() => {
+    sheet_ty.value = withTiming(0, { duration: 260 });
+  }, [sheet_ty]);
   const sheet_style = useAnimatedStyle(() => ({ transform: [{ translateY: sheet_ty.value }] }));
   // THESE ASSIGNMENTS RUN INSIDE GESTURE WORKLETS AT EVENT TIME, NOT RENDER —
   // THE IMMUTABILITY LINT CAN'T SEE THAT.
@@ -361,6 +408,7 @@ function ComposerForm({
       ? check_hours(place, day.date, start_time, start_time + duration_min)
       : null;
 
+  const parsed_cost = Number.parseFloat(cost_text.replace(/[^0-9.]/g, ''));
   const build_result = (): ComposerResult => ({
     block_type,
     title: resolved_title,
@@ -370,6 +418,9 @@ function ComposerForm({
     place: place ?? (place_query.trim() ? { name: place_query.trim() } : undefined),
     notes: notes.trim() || undefined,
     confirmation_number: confirmation_number.trim() || undefined,
+    cost: Number.isFinite(parsed_cost) && parsed_cost > 0 ? parsed_cost : undefined,
+    needs_booking,
+    is_locked: locked,
   });
 
   return (
@@ -427,20 +478,22 @@ function ComposerForm({
               })}
             </ScrollView>
 
-            {/* WEB PAINTS A PERMANENT GUTTER SCROLLBAR HERE — HIDE IT AND LET
-                CONTENT SCROLL BARE; NATIVE KEEPS ITS FADING OVERLAY INDICATOR.
-                automaticallyAdjustKeyboardInsets IS THE KEYBOARD STORY (iOS):
-                THE SHEET NEVER MOVES — THIS SCROLL AREA GAINS A BOTTOM INSET
-                MATCHING THE KEYBOARD OVERLAP AND iOS SCROLLS THE FOCUSED INPUT
-                INTO THE VISIBLE PART AUTOMATICALLY. */}
+            {/* NO SCROLL INDICATOR ANYWHERE — THE OVERLAY BAR SAT RIGHT ON THE
+                CARDS' RIGHT BORDERS AND LOOKED BROKEN. KEYBOARD-HEIGHT BOTTOM
+                PADDING (SEE reveal_focused ABOVE) IS WHAT KEEPS EVERY FOCUSED
+                CARD REACHABLE ABOVE THE KEYBOARD. */}
             <ScrollView
               ref={fields_ref}
               bounces={false}
-              automaticallyAdjustKeyboardInsets
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="on-drag"
-              showsVerticalScrollIndicator={Platform.OS !== 'web'}
-              contentContainerStyle={styles.fields_content}
+              onScroll={track_scroll}
+              scrollEventThrottle={16}
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={[
+                styles.fields_content,
+                keyboard_height > 0 && { paddingBottom: keyboard_height + 24 },
+              ]}
               style={styles.fields_scroll}>
             {block_type === 'flight' && (
               <FieldCard
@@ -482,18 +535,55 @@ function ComposerForm({
               </FieldCard>
             )}
 
+            {/* MANUAL ROUTE: SEPARATE FROM/TO AIRPORT FIELDS — THEY COMBINE
+                INTO THE TITLE ("DL 1204 · LAX → BOS") UNLESS ONE IS TYPED. */}
+            {block_type === 'flight' && (
+              <View style={styles.time_row}>
+                <FieldCard {...field_props('flight_from')} style={[styles.field_card, { flex: 1 }]}>
+                  <Text style={styles.field_eyebrow}>FROM</Text>
+                  <TextInput
+                    style={styles.field_input}
+                    value={flight_from}
+                    onChangeText={set_flight_from}
+                    placeholder="LAX"
+                    placeholderTextColor={color.ink_faint}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    maxLength={4}
+                  />
+                </FieldCard>
+                <FieldCard {...field_props('flight_to')} style={[styles.field_card, { flex: 1 }]}>
+                  <Text style={styles.field_eyebrow}>TO</Text>
+                  <TextInput
+                    style={styles.field_input}
+                    value={flight_to}
+                    onChangeText={set_flight_to}
+                    placeholder="BOS"
+                    placeholderTextColor={color.ink_faint}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                    maxLength={4}
+                  />
+                </FieldCard>
+              </View>
+            )}
+
             <FieldCard {...field_props('title')} style={styles.field_card}>
               <Text style={styles.field_eyebrow}>TITLE</Text>
               <TextInput
                 style={styles.field_input}
                 value={title}
                 onChangeText={set_title}
-                placeholder={place?.name ?? (place_query.trim() || 'Dinner with Sarah')}
+                placeholder={
+                  block_type === 'flight'
+                    ? flight_auto_title || 'DL 1204 · LAX → BOS'
+                    : (place?.name ?? (place_query.trim() || 'Dinner with Sarah'))
+                }
                 placeholderTextColor={color.ink_faint}
               />
             </FieldCard>
 
-            {block_type !== 'flight' && block_type !== 'note' && (
+            {block_type !== 'flight' && block_type !== 'note' && block_type !== 'buffer' && (
               <FieldCard
                 {...field_props('place')}
                 style={[styles.field_card, styles.place_card]}
@@ -512,6 +602,11 @@ function ComposerForm({
                   />
                   {place != null && (
                     <MaterialCommunityIcons name="check-circle-outline" size={18} color={color.anchor} />
+                  )}
+                  {(place != null || place_query.length > 0) && (
+                    <Pressable onPress={clear_place} hitSlop={8}>
+                      <MaterialCommunityIcons name="close-circle" size={18} color={color.ink_ghost} />
+                    </Pressable>
                   )}
                 </View>
 
@@ -653,6 +748,58 @@ function ComposerForm({
                 }}
               />
             </View>
+
+            {/* COST ON ITS OWN FULL-WIDTH ROW (BUDGET LAYER, §4 TIER 2).
+                IDEAS HAVE NONE; NOTES AND BUFFERS HAVE NO PRICE. */}
+            {!shelf_editing && block_type !== 'note' && block_type !== 'buffer' && (
+              <FieldCard
+                {...field_props('cost')}
+                style={[styles.field_card, { marginTop: space.card_gap, marginBottom: 0 }]}>
+                <Text style={styles.field_eyebrow}>COST · OPTIONAL</Text>
+                <TextInput
+                  style={styles.field_input}
+                  value={cost_text}
+                  onChangeText={set_cost_text}
+                  placeholder="$0"
+                  placeholderTextColor={color.ink_faint}
+                  keyboardType="decimal-pad"
+                />
+              </FieldCard>
+            )}
+
+            {/* THE TOGGLE ROW: RESERVATION (AMBER, BOOKING SEMANTICS) AND
+                LOCK (GREEN, ANCHOR SEMANTICS — DRAGS AND ONE-TAP FIXES FLOW
+                AROUND A LOCKED BLOCK) SIDE BY SIDE AS MATCHING PILLS. */}
+            {!shelf_editing && (
+              <View style={[styles.time_row, { marginTop: space.card_gap }]}>
+                {(block_type === 'meal' || block_type === 'activity') && (
+                  <Pressable
+                    onPress={() => set_needs_booking(!needs_booking)}
+                    style={[styles.toggle_tile, needs_booking && styles.booking_toggle_on]}>
+                    <MaterialCommunityIcons
+                      name={needs_booking ? 'calendar-check' : 'calendar-clock-outline'}
+                      size={15}
+                      color={needs_booking ? color.meal_text : color.ink_muted}
+                    />
+                    <Text style={[styles.toggle_label, needs_booking && styles.booking_label_on]}>
+                      Reservation
+                    </Text>
+                  </Pressable>
+                )}
+                <Pressable
+                  onPress={() => set_lock_override(!locked)}
+                  style={[styles.toggle_tile, locked && styles.lock_toggle_on]}>
+                  <MaterialCommunityIcons
+                    name={locked ? 'lock' : 'lock-open-variant-outline'}
+                    size={15}
+                    color={locked ? color.anchor_text : color.ink_muted}
+                  />
+                  <Text style={[styles.toggle_label, locked && styles.lock_label_on]}>
+                    Lock in Place
+                  </Text>
+                </Pressable>
+              </View>
+            )}
 
             {is_anchor_type && (
               <FieldCard {...field_props('confirmation')} style={[styles.field_card, { marginTop: space.card_gap }]}>
@@ -913,6 +1060,27 @@ const styles = StyleSheet.create({
     marginTop: 3,
   },
   stepper_value: { fontSize: 14, color: color.ink },
+
+  // TOGGLE PILLS: RESERVATION WEARS THE AMBER FAMILY (§3.0 CHIPS), LOCK THE
+  // GREEN ANCHOR FAMILY — SAME SHAPE, SEMANTIC COLOR ONLY WHEN ON.
+  toggle_tile: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    borderRadius: radius.card,
+    borderWidth: hairline_width,
+    borderColor: color.hairline,
+    backgroundColor: color.card_surface,
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+  },
+  toggle_label: { fontSize: 12, color: color.ink_muted },
+  booking_toggle_on: { backgroundColor: color.meal_tint, borderColor: color.meal },
+  booking_label_on: { color: color.meal_text, fontWeight: '500' },
+  lock_toggle_on: { backgroundColor: color.anchor_tint, borderColor: color.anchor_pin },
+  lock_label_on: { color: color.anchor_text, fontWeight: '500' },
 
   move_row: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   move_chip: {

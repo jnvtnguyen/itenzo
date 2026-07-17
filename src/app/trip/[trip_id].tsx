@@ -1,5 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
@@ -13,11 +13,13 @@ import { DayMap } from '@/components/day_map';
 import { IdeaShelf } from '@/components/idea_shelf';
 import { Text } from '@/components/text';
 import { TimelineCanvas, resolve_push, type TimelineCanvasHandle } from '@/components/timeline_canvas';
+import { TripSettingsSheet, type TripSettingsPatch } from '@/components/trip_settings_sheet';
 import { DAY_MIN, MIN_BLOCK_MIN, PX_PER_MIN } from '@/components/timeline_metrics';
 import { Wordmark } from '@/components/wordmark';
+import { StatusChip } from '@/components/chip';
 import { fmt_date_range, fmt_duration, snap_time } from '@/model/time';
 import type { Block, BlockType, Day, ShelfItem } from '@/model/types';
-import { decorate_day, resolve_fix_start } from '@/services/feasibility';
+import { day_pacing, decorate_day, resolve_fix_start } from '@/services/feasibility';
 import { use_trip, use_trip_store } from '@/store/trip_store';
 import { color, font, hairline_width, radius, space } from '@/theme/tokens';
 
@@ -58,6 +60,9 @@ export default function TripScreen() {
   const [composer, set_composer] = useState<ComposerState>(null);
   // BUMPED ON EVERY OPEN SO THE COMPOSER FORM REMOUNTS WITH FRESH STATE.
   const [composer_seq, set_composer_seq] = useState(0);
+  const [settings_open, set_settings_open] = useState(false);
+  // BUMPED ON EVERY OPEN SO THE SETTINGS FORM REMOUNTS WITH FRESH STATE.
+  const [settings_seq, set_settings_seq] = useState(0);
   const [shelf_drag_item, set_shelf_drag_item] = useState<ShelfItem | null>(null);
   const [shelf_preview, set_shelf_preview] = useState<
     { start_time: number; duration_min: number; title: string; block_type: BlockType } | null
@@ -112,6 +117,8 @@ export default function TripScreen() {
 
   const day_index = trip.days.findIndex((d) => d.id === day.id);
   const walk_miles = walk_miles_of(display_blocks);
+  // PACING + BUDGET AT A GLANCE (§4 TIER 2) — DERIVED, NEVER STORED.
+  const pacing = day_pacing(display_blocks);
 
   const close_composer = () => set_composer(null);
 
@@ -136,10 +143,27 @@ export default function TripScreen() {
     store.set_day_times(trip.id, day.id, updates);
   };
 
+  // PER-LEG MODE OVERRIDE (§4 TIER 1.3): EACH TAP ON A TRANSIT LEG STEPS TO
+  // THE NEXT MODE; LANDING BACK ON undefined RESTORES THE DISTANCE DEFAULT.
+  // A STORE MUTATION LIKE ANY OTHER, SO IT'S UNDOABLE.
+  const handle_change_leg_mode = (block: Block) => {
+    const cycle: (Block['transit_mode_override'] | undefined)[] = [
+      undefined,
+      'walk',
+      'drive',
+      'transit',
+      'rideshare',
+    ];
+    const next = cycle[(cycle.indexOf(block.transit_mode_override) + 1) % cycle.length];
+    store.update_block(trip.id, day.id, block.id, { transit_mode_override: next });
+  };
+
   const handle_submit = (result: ComposerResult) => {
     const booking = result.confirmation_number
       ? { confirmation_number: result.confirmation_number, status: 'booked' as const }
-      : undefined;
+      : result.needs_booking
+        ? { status: 'needs_booking' as const }
+        : undefined;
     if (composer?.mode === 'shelf') {
       store.update_shelf_item(trip.id, composer.item.id, {
         title: result.title,
@@ -159,6 +183,8 @@ export default function TripScreen() {
         end_time: result.start_time + result.duration_min,
         place: result.place ?? undefined,
         notes: result.notes,
+        cost: result.cost,
+        is_locked: result.is_locked,
         booking,
         // KEEP TRANSIT/CONFLICT META; ONLY THE BOOKED CHIP TRACKS THE BOOKING.
         meta: booking
@@ -168,6 +194,9 @@ export default function TripScreen() {
             : prior_meta,
       });
     } else {
+      // THE COMPOSER ALREADY RESOLVED THE SHOWN START TO A CONFLICT-FREE SLOT
+      // (ON OPEN AND ON PLACE PICK) — WHAT THE STEPPER READS IS WHERE IT
+      // LANDS, SO NO SILENT SHIFT HAPPENS HERE.
       store.add_block(trip.id, day.id, {
         block_type: result.block_type,
         title: result.title,
@@ -175,9 +204,10 @@ export default function TripScreen() {
         duration_min: result.duration_min,
         place: result.place,
         notes: result.notes,
+        cost: result.cost,
         booking,
-        // FLIGHTS AND STAYS ENTER AS LOCKED ANCHORS (§2.2).
-        is_locked: result.block_type === 'flight' || result.block_type === 'lodging',
+        // THE COMPOSER'S LOCK TOGGLE DECIDES — FLIGHTS AND STAYS DEFAULT ON (§2.2).
+        is_locked: result.is_locked,
       });
     }
     close_composer();
@@ -273,6 +303,14 @@ export default function TripScreen() {
               color={can_redo ? color.ink_secondary : color.ink_ghost}
             />
           </Pressable>
+          <Pressable
+            onPress={() => {
+              set_settings_seq((s) => s + 1);
+              set_settings_open(true);
+            }}
+            hitSlop={6}>
+            <MaterialCommunityIcons name="cog-outline" size={18} color={color.ink_secondary} />
+          </Pressable>
         </View>
         <Text style={styles.trip_title}>{trip.title}</Text>
         <Text style={styles.trip_meta}>
@@ -291,6 +329,10 @@ export default function TripScreen() {
           {day.theme_label ? ` · ${day.theme_label}` : ''}
         </Text>
         <View style={styles.day_header_right}>
+          {pacing.intensity === 'packed' && <StatusChip label="Packed day" kind="meal" />}
+          {pacing.cost_total > 0 && (
+            <Text style={styles.walk_total}>${Math.round(pacing.cost_total).toLocaleString()}</Text>
+          )}
           {walk_miles > 0 && (
             <Text style={styles.walk_total}>{Math.round(walk_miles * 10) / 10} mi on foot</Text>
           )}
@@ -331,6 +373,7 @@ export default function TripScreen() {
           shelf_preview={shelf_preview}
           on_edit_block={(block) => open_composer({ mode: 'edit', block })}
           on_fix_block={handle_fix_block}
+          on_change_leg_mode={handle_change_leg_mode}
           on_commit_times={(updates) => store.set_day_times(trip.id, day.id, updates)}
           on_fill_gap={(start_time) => open_composer({ mode: 'add', default_start: start_time })}
           on_add_first={() => open_composer({ mode: 'add', default_start: DEFAULT_DAY_START })}
@@ -422,6 +465,22 @@ export default function TripScreen() {
               }
             : undefined
         }
+      />
+
+      <TripSettingsSheet
+        trip={trip}
+        visible={settings_open}
+        instance_key={settings_seq}
+        on_close={() => set_settings_open(false)}
+        on_save={(patch: TripSettingsPatch) => {
+          store.update_trip(trip.id, patch);
+          set_settings_open(false);
+        }}
+        on_delete={() => {
+          set_settings_open(false);
+          store.delete_trip(trip.id);
+          router.replace('/');
+        }}
       />
     </View>
   );

@@ -22,6 +22,11 @@ function TripCard({ trip }: { trip: Trip }) {
   const block_count = trip.days.reduce((n, d) => n + d.blocks.length, 0);
   const anchor_count = trip.days.reduce((n, d) => n + d.blocks.filter((b) => b.is_locked).length, 0);
   const day_count = days_between(trip.start_date, trip.end_date) + 1;
+  // BUDGET ROLLUP (§4 TIER 2): SUM OF EVERY BLOCK'S OPTIONAL COST.
+  const trip_cost = trip.days.reduce(
+    (sum, d) => sum + d.blocks.reduce((s, b) => s + (b.cost ?? 0), 0),
+    0,
+  );
 
   return (
     <Pressable
@@ -40,6 +45,9 @@ function TripCard({ trip }: { trip: Trip }) {
         <Text style={styles.trip_chip}>{block_count} blocks</Text>
         <Text style={styles.trip_chip}>{anchor_count} anchors</Text>
         <Text style={styles.trip_chip}>{trip.idea_shelf.length} shelved</Text>
+        {trip_cost > 0 && (
+          <Text style={styles.trip_chip}>${Math.round(trip_cost).toLocaleString()}</Text>
+        )}
       </View>
     </Pressable>
   );
@@ -88,7 +96,7 @@ export default function HomeScreen() {
         <View style={styles.row_between}>
           <Wordmark />
           <View style={styles.avatar}>
-            <Text style={styles.avatar_text}>JN</Text>
+            <MaterialCommunityIcons name="account-outline" size={17} color={color.brand_text} />
           </View>
         </View>
         <Text style={styles.screen_title}>Your trips</Text>

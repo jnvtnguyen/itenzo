@@ -14,9 +14,9 @@ import { Text } from '@/components/text';
 import {
   BLOCK_SPACER_PX,
   CANVAS_PAD,
-  CONFLICT_MIN_PX,
   CARD_LEFT,
   CARD_RIGHT,
+  CONFLICT_MIN_PX,
   DAY_MIN,
   EDGE_PAD,
   GAP_MAX_PX,
@@ -69,6 +69,8 @@ interface LayoutSeg {
   height: number;
   block?: Block;
   leg?: TransitLeg;
+  // THE BLOCK THE LEG DEPARTS FROM — TAPPING THE LEG CYCLES ITS MODE OVERRIDE.
+  leg_owner?: Block;
 }
 
 interface Layout {
@@ -88,20 +90,21 @@ export function compute_layout(blocks: Block[]): Layout {
   let cursor_min = 0;
   let prev_block: Block | undefined;
 
-  const push_gap = (from_min: number, to_min: number, leg?: TransitLeg) => {
+  const push_gap = (from_min: number, to_min: number, leg_owner?: Block) => {
     const gap = to_min - from_min;
+    const leg = leg_owner?.meta?.transit_to_next;
     if (gap <= 0) {
       segs.push({ kind: 'spacer', from_min, to_min: from_min, top: y, height: BLOCK_SPACER_PX });
       y += BLOCK_SPACER_PX;
       return;
     }
     const height = Math.min(Math.max(gap * PX_PER_MIN, GAP_MIN_PX), GAP_MAX_PX);
-    segs.push({ kind: 'gap', from_min, to_min, top: y, height, leg });
+    segs.push({ kind: 'gap', from_min, to_min, top: y, height, leg, leg_owner });
     y += height;
   };
 
   for (const block of sorted) {
-    if (prev_block) push_gap(cursor_min, block.start_time, prev_block.meta?.transit_to_next);
+    if (prev_block) push_gap(cursor_min, block.start_time, prev_block);
     else if (block.start_time > 0) push_gap(0, block.start_time);
     // CONFLICTED BLOCKS GET A FLOOR HEIGHT SO THE CONFLICT BAR + FIX PILL FIT.
     const height = Math.max(
@@ -251,8 +254,11 @@ export const TimelineCanvas = forwardRef<
       block_type: BlockType;
     } | null;
     on_edit_block: (block: Block) => void;
-    // ONE-TAP CONFLICT FIX FROM A BLOCK'S "FIX IT" LABEL.
+    // ONE-TAP CONFLICT FIX FROM A BLOCK'S "FIX" LABEL.
     on_fix_block: (block: Block) => void;
+    // TAPPING A TRANSIT LEG CYCLES ITS MODE (WALK → DRIVE → TRANSIT → RIDE →
+    // AUTO); THE OVERRIDE LIVES ON THE BLOCK THE LEG DEPARTS FROM.
+    on_change_leg_mode: (block: Block) => void;
     on_commit_times: (updates: TimeUpdate[]) => void;
     on_fill_gap: (start_time: number) => void;
     on_add_first: () => void;
@@ -265,6 +271,7 @@ export const TimelineCanvas = forwardRef<
     shelf_preview,
     on_edit_block,
     on_fix_block,
+    on_change_leg_mode,
     on_commit_times,
     on_fill_gap,
     on_add_first,
@@ -293,6 +300,22 @@ export const TimelineCanvas = forwardRef<
     [blocks, day_date],
   );
   const layout = useMemo(() => compute_layout(decorated), [decorated]);
+
+  // LIVE "NOW" LINE (§4 TIER 3, LITE): ONLY ON THE DAY THAT IS ACTUALLY
+  // TODAY. CLOCK READS LIVE IN AN EFFECT (NEVER DURING RENDER) AND TICKS
+  // EVERY HALF MINUTE.
+  const [now, set_now] = useState<{ iso: string; min: number } | null>(null);
+  useEffect(() => {
+    const tick = () => {
+      const d = new Date();
+      const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      set_now({ iso, min: d.getHours() * 60 + d.getMinutes() });
+    };
+    tick();
+    const timer = setInterval(tick, 30000);
+    return () => clearInterval(timer);
+  }, []);
+  const now_min = now != null && now.iso === day_date ? now.min : null;
   const layout_ref = useRef(layout);
   useEffect(() => {
     layout_ref.current = layout;
@@ -473,7 +496,16 @@ export const TimelineCanvas = forwardRef<
                   style={[styles.gap_band, { top: seg.top, height: seg.height, opacity: hidden ? 0 : 1 }]}
                   pointerEvents={hidden ? 'none' : 'box-none'}>
                   {seg.leg && (
-                    <View style={styles.leg_row}>
+                    // TAPPING THE LEG CYCLES ITS MODE — ONLY MEANINGFUL WHEN
+                    // THE ENGINE COMPUTES THE LEG (BOTH ENDS HAVE COORDS).
+                    <Pressable
+                      disabled={
+                        seg.leg_owner?.place?.coords == null ||
+                        layout.segs[i + 1]?.block?.place?.coords == null
+                      }
+                      onPress={() => seg.leg_owner && on_change_leg_mode(seg.leg_owner)}
+                      hitSlop={6}
+                      style={styles.leg_row}>
                       <View style={styles.leg_dashes}>
                         {Array.from({ length: Math.max(2, Math.floor((seg.height - 8) / 9)) }, (_, d) => (
                           <View
@@ -491,13 +523,20 @@ export const TimelineCanvas = forwardRef<
                         {fmt_duration(seg.leg.duration_min)}
                         {seg.leg.distance_mi ? ` · ${seg.leg.distance_mi} mi` : ''}
                       </Text>
-                    </View>
+                      {/* A SWAP GLYPH MARKS THE LEG AS TAPPABLE. */}
+                      {seg.leg_owner?.place?.coords != null &&
+                        layout.segs[i + 1]?.block?.place?.coords != null && (
+                          <MaterialCommunityIcons
+                            name="swap-horizontal"
+                            size={15}
+                            color={color.ink_faint}
+                          />
+                        )}
+                    </Pressable>
                   )}
                   {free_min >= GAP_THRESHOLD_MIN && (
                     <Pressable
-                      onPress={() =>
-                        on_fill_gap(snap_time(seg.from_min + (seg.leg?.duration_min ?? 0)))
-                      }
+                      onPress={() => on_fill_gap(snap_time(seg.from_min + (seg.leg?.duration_min ?? 0)))}
                       style={styles.gap_pill}>
                       <Text style={styles.gap_free}>{fmt_duration(free_min)} free</Text>
                       <MaterialCommunityIcons name="creation" size={12} color={color.brand} />
@@ -634,6 +673,17 @@ export const TimelineCanvas = forwardRef<
             </>
           )}
 
+          {/* THE "NOW" LINE — TODAY ONLY, GLIDES DOWN AS THE DAY GOES. */}
+          {now_min != null && (
+            <View
+              pointerEvents="none"
+              style={[styles.now_row, { top: y_of_min(layout, now_min) - 3 }]}>
+              <Text style={styles.now_label}>now</Text>
+              <View style={styles.now_dot} />
+              <View style={styles.now_rule} />
+            </View>
+          )}
+
           {blocks.length === 0 && (
             <View style={[styles.empty_day, { top: CANVAS_PAD + 12 }]}>
               <Text style={styles.empty_title}>Nothing planned yet</Text>
@@ -681,6 +731,19 @@ const styles = StyleSheet.create({
   },
   gap_free: { fontSize: 11, color: color.ink_muted },
   gap_fill: { fontSize: 11, color: color.brand_text },
+
+  now_row: {
+    position: 'absolute',
+    left: EDGE_PAD,
+    right: CARD_RIGHT,
+    flexDirection: 'row',
+    alignItems: 'center',
+    zIndex: 26,
+    elevation: 26,
+  },
+  now_label: { fontSize: 9, fontWeight: '500', color: color.brand, marginRight: 3 },
+  now_dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: color.brand },
+  now_rule: { flex: 1, height: 1.5, backgroundColor: color.brand, opacity: 0.45, marginLeft: 2 },
 
   // THE SHELF-DROP PREVIEW WEARS THE EXACT LIFTED-BLOCK LOOK OF A TIMELINE
   // DRAG — SAME SURFACE, EDGE STRIP, TYPE, TILT, AND SCALE AS BLOCKCARD LIFTED.

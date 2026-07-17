@@ -1,6 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { Keyboard, Pressable, StyleSheet, View } from 'react-native';
 
 import { add_days } from '@/model/time';
 import { FieldCard, Text, TextInput } from '@/components/text';
@@ -83,6 +83,8 @@ export function TripSetupFields({
   };
 
   const pick_city = (c: CityResult) => {
+    // PICKING ENDS THE TYPING — SELECT AND PUT THE KEYBOARD AWAY IN ONE TAP.
+    Keyboard.dismiss();
     set_destination(c.full_name);
     on_pick_city?.(c);
     set_picked(true);

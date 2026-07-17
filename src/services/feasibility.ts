@@ -30,6 +30,26 @@ export function compute_leg(a?: Coords, b?: Coords): TransitLeg | null {
   return { mode: 'drive', duration_min: Math.ceil(6 + mi * 4), distance_mi };
 }
 
+// PER-LEG MODE OVERRIDE: SAME CITY-PACE HEURISTICS, FORCED MODE. RIDESHARE
+// ADDS PICKUP WAIT; TRANSIT ADDS WALK-TO-STOP + HEADWAY.
+export function leg_for_mode(a?: Coords, b?: Coords, mode?: TransitLeg['mode']): TransitLeg | null {
+  if (mode == null) return compute_leg(a, b);
+  if (!a || !b) return null;
+  const mi = haversine_mi(a, b);
+  if (mi < MIN_LEG_MI) return null;
+  const distance_mi = Math.round(mi * 10) / 10;
+  switch (mode) {
+    case 'walk':
+      return { mode, duration_min: Math.max(2, Math.ceil(mi * 20)), distance_mi };
+    case 'drive':
+      return { mode, duration_min: Math.ceil(6 + mi * 4), distance_mi };
+    case 'rideshare':
+      return { mode, duration_min: Math.ceil(10 + mi * 4), distance_mi };
+    case 'transit':
+      return { mode, duration_min: Math.ceil(10 + mi * 5), distance_mi };
+  }
+}
+
 const mode_word: Record<TransitLeg['mode'], string> = {
   walk: 'walk',
   drive: 'drive',
@@ -52,7 +72,7 @@ export function decorate_day(day: Day): Block[] {
   for (let i = 0; i < out.length - 1; i++) {
     const a = out[i];
     const b = out[i + 1];
-    const computed = compute_leg(a.place?.coords, b.place?.coords);
+    const computed = leg_for_mode(a.place?.coords, b.place?.coords, a.transit_mode_override);
     if (computed) a.meta = { ...a.meta, transit_to_next: computed };
     const leg = computed ?? a.meta?.transit_to_next;
     if (!leg) continue;
@@ -75,6 +95,48 @@ export function decorate_day(day: Day): Block[] {
   }
 
   return out.map((b) => decorate_block_hours(b, day.date));
+}
+
+// PACING ENGINE (§4 TIER 2): A DAY'S INTENSITY FROM SCHEDULED HOURS, WALKING
+// MILES, AND BACK-TO-BACK TRANSITIONS — DETERMINISTIC, DERIVED AT DISPLAY TIME.
+export interface DayPacing {
+  intensity: 'relaxed' | 'balanced' | 'packed';
+  scheduled_min: number;
+  walk_mi: number;
+  back_to_back: number;
+  cost_total: number;
+}
+
+const BACK_TO_BACK_GAP_MIN = 15;
+
+export function day_pacing(blocks: Block[]): DayPacing {
+  const sorted = [...blocks].sort((a, b) => a.start_time - b.start_time);
+  let scheduled_min = 0;
+  let walk_mi = 0;
+  let back_to_back = 0;
+  let cost_total = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    const b = sorted[i];
+    // NOTES AND BUFFERS ARE REST, NOT LOAD.
+    if (b.block_type !== 'note' && b.block_type !== 'buffer') {
+      scheduled_min += b.end_time - b.start_time;
+    }
+    if (b.cost != null) cost_total += b.cost;
+    const leg = b.meta?.transit_to_next;
+    if (leg?.mode === 'walk' && leg.distance_mi) walk_mi += leg.distance_mi;
+    const next = sorted[i + 1];
+    if (next && next.start_time - b.end_time - (leg?.duration_min ?? 0) < BACK_TO_BACK_GAP_MIN) {
+      back_to_back += 1;
+    }
+  }
+  const score = scheduled_min / 60 + walk_mi * 1.5 + back_to_back * 0.75;
+  return {
+    intensity: score >= 10 ? 'packed' : score < 5 ? 'relaxed' : 'balanced',
+    scheduled_min,
+    walk_mi: Math.round(walk_mi * 10) / 10,
+    back_to_back,
+    cost_total,
+  };
 }
 
 // ONE-TAP FIX PLACEMENT: THE NAIVE SUGGESTION (OPENING TIME / PREV END +

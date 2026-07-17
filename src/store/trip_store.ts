@@ -3,7 +3,6 @@ import { createJSONStorage, persist, type StateStorage } from 'zustand/middlewar
 
 import { add_days, days_between } from '@/model/time';
 import type { Block, BlockType, Preferences, ShelfItem, Trip } from '@/model/types';
-import { boston_trip } from '@/store/seed';
 
 // THE BOSTON DEMO TRIP SEEDS ONLY WHEN EXPLICITLY REQUESTED (THE HEADLESS
 // SUITE EXPORTS WITH EXPO_PUBLIC_SEED_DEMO=1) — REAL SESSIONS START EMPTY AND
@@ -36,6 +35,7 @@ export interface NewBlockInput {
   notes?: string;
   is_locked?: boolean;
   booking?: Block['booking'];
+  cost?: number;
 }
 
 interface TripStore {
@@ -52,6 +52,11 @@ interface TripStore {
     travelers?: number;
     preferences?: Preferences;
   }): string;
+  update_trip(
+    trip_id: string,
+    patch: Partial<Pick<Trip, 'title' | 'destination' | 'anchor' | 'travelers'>>,
+  ): void;
+  delete_trip(trip_id: string): void;
   add_block(trip_id: string, day_id: string, input: NewBlockInput): string;
   update_block(trip_id: string, day_id: string, block_id: string, patch: Partial<Block>): void;
   delete_block(trip_id: string, day_id: string, block_id: string): void;
@@ -89,10 +94,46 @@ function mutate(
 ): Pick<TripStore, 'trips' | 'past' | 'future'> {
   const next = clone_trips(state.trips);
   fn(next);
+  // STAMP THE TRIPS THAT ACTUALLY CHANGED — LAST-WRITER-WINS FUEL FOR CLOUD
+  // SYNC. THE STRINGIFY DIFF IS FINE AT THIS SCALE (A HANDFUL OF SMALL TRIPS).
+  const prev_by_id = new Map(state.trips.map((t) => [t.id, JSON.stringify(t)]));
+  for (const trip of next) {
+    if (prev_by_id.get(trip.id) !== JSON.stringify(trip)) {
+      trip.updated_at = new Date().toISOString();
+    }
+  }
   return {
     trips: next,
     past: [...state.past.slice(-UNDO_LIMIT + 1), state.trips],
     future: [],
+  };
+}
+
+// TRIP-LEVEL OPS (CREATE / SETTINGS / DELETE) LIVE *OUTSIDE* THE UNDO
+// TIMELINE — UNDO IS FOR ITINERARY EDITS. THE CHANGE APPLIES TO THE PRESENT
+// AND TO EVERY PAST/FUTURE SNAPSHOT ALIKE, SO A LATER UNDO OF A BLOCK EDIT
+// CAN NEVER DELETE A FRESHLY CREATED TRIP OR RESURRECT A DELETED ONE.
+function mutate_everywhere(
+  state: Pick<TripStore, 'trips' | 'past' | 'future'>,
+  fn: (trips: Trip[]) => void,
+): Pick<TripStore, 'trips' | 'past' | 'future'> {
+  const apply = (trips: Trip[]) => {
+    const next = clone_trips(trips);
+    fn(next);
+    return next;
+  };
+  const next = apply(state.trips);
+  // STAMP ONLY THE PRESENT — SNAPSHOTS GET RESTAMPED IF UNDO RESTORES THEM.
+  const prev_by_id = new Map(state.trips.map((t) => [t.id, JSON.stringify(t)]));
+  for (const trip of next) {
+    if (prev_by_id.get(trip.id) !== JSON.stringify(trip)) {
+      trip.updated_at = new Date().toISOString();
+    }
+  }
+  return {
+    trips: next,
+    past: state.past.map(apply),
+    future: state.future.map(apply),
   };
 }
 
@@ -101,34 +142,55 @@ function find_day(trips: Trip[], trip_id: string, day_id: string) {
 }
 
 const store_definition: StateCreator<TripStore> = (set) => ({
-  trips: seed_demo ? [boston_trip] : [],
+  trips: [],
   past: [],
   future: [],
 
   create_trip(input) {
-    const trip_id = uid('trip');
+    // BUILT ONCE, OUTSIDE THE APPLY FN — DAY IDS MUST BE IDENTICAL IN EVERY
+    // SNAPSHOT THE TRIP IS ADDED TO.
+    const day_count = Math.max(1, days_between(input.start_date, input.end_date) + 1);
+    const new_trip: Trip = {
+      id: uid('trip'),
+      title: input.title,
+      destination: input.destination,
+      anchor: input.anchor,
+      start_date: input.start_date,
+      end_date: input.end_date,
+      travelers: input.travelers ?? 1,
+      preferences: input.preferences,
+      idea_shelf: [],
+      days: Array.from({ length: day_count }, (_, i) => ({
+        id: uid('day'),
+        date: add_days(input.start_date, i),
+        blocks: [],
+      })),
+    };
     set((state) =>
-      mutate(state, (trips) => {
-        const day_count = Math.max(1, days_between(input.start_date, input.end_date) + 1);
-        trips.push({
-          id: trip_id,
-          title: input.title,
-          destination: input.destination,
-          anchor: input.anchor,
-          start_date: input.start_date,
-          end_date: input.end_date,
-          travelers: input.travelers ?? 1,
-          preferences: input.preferences,
-          idea_shelf: [],
-          days: Array.from({ length: day_count }, (_, i) => ({
-            id: uid('day'),
-            date: add_days(input.start_date, i),
-            blocks: [],
-          })),
-        });
+      mutate_everywhere(state, (trips) => {
+        trips.push(clone_trips([new_trip])[0]);
       }),
     );
-    return trip_id;
+    return new_trip.id;
+  },
+
+  update_trip(trip_id, patch) {
+    set((state) =>
+      mutate_everywhere(state, (trips) => {
+        const trip = trips.find((t) => t.id === trip_id);
+        if (!trip) return;
+        Object.assign(trip, patch);
+      }),
+    );
+  },
+
+  delete_trip(trip_id) {
+    set((state) =>
+      mutate_everywhere(state, (trips) => {
+        const idx = trips.findIndex((t) => t.id === trip_id);
+        if (idx >= 0) trips.splice(idx, 1);
+      }),
+    );
   },
 
   add_block(trip_id, day_id, input) {
@@ -148,6 +210,7 @@ const store_definition: StateCreator<TripStore> = (set) => ({
             place: input.place,
             notes: input.notes,
             booking: input.booking,
+            cost: input.cost,
             source: 'manual',
             is_locked: input.is_locked ?? false,
             // A CONFIRMED BOOKING EARNS THE GREEN "BOOKED" CHIP (§3.0 STATUS CHIPS).
@@ -332,7 +395,9 @@ const store_definition: StateCreator<TripStore> = (set) => ({
       if (state.past.length === 0) return state;
       const previous = state.past[state.past.length - 1];
       return {
-        trips: previous,
+        // RESTAMP: THE RESTORED SNAPSHOT IS NOW THE NEWEST TRUTH — WITHOUT
+        // THIS, CLOUD SYNC'S LAST-WRITER-WINS WOULD RESURRECT THE UNDONE STATE.
+        trips: restamp(previous),
         past: state.past.slice(0, -1),
         future: [state.trips, ...state.future],
       };
@@ -344,13 +409,18 @@ const store_definition: StateCreator<TripStore> = (set) => ({
       if (state.future.length === 0) return state;
       const [next, ...rest] = state.future;
       return {
-        trips: next,
+        trips: restamp(next),
         past: [...state.past, state.trips],
         future: rest,
       };
     });
   },
 });
+
+function restamp(trips: Trip[]): Trip[] {
+  const now = new Date().toISOString();
+  return trips.map((t) => ({ ...t, updated_at: now }));
+}
 
 // OFFLINE-FIRST PERSISTENCE (PLAN §7): THE TRIPS ARRAY SNAPSHOTS TO
 // ASYNC-STORAGE (LOCALSTORAGE-BACKED ON WEB). EVERY CALL IS GUARDED SO A DEV

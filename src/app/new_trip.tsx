@@ -53,6 +53,9 @@ export default function NewTripScreen() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: color.canvas }}
+      // FIRST TAP ON A CITY SUGGESTION SELECTS IT — WITHOUT THIS, A TAP WHILE
+      // THE KEYBOARD IS UP ONLY DISMISSES THE KEYBOARD.
+      keyboardShouldPersistTaps="handled"
       contentContainerStyle={{ paddingTop: insets.top + 12, paddingBottom: 40 }}>
       <View style={{ paddingHorizontal: space.gutter }}>
         <View style={styles.header_row}>
