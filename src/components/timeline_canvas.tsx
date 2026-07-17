@@ -260,7 +260,8 @@ export const TimelineCanvas = forwardRef<
     // AUTO); THE OVERRIDE LIVES ON THE BLOCK THE LEG DEPARTS FROM.
     on_change_leg_mode: (block: Block) => void;
     on_commit_times: (updates: TimeUpdate[]) => void;
-    on_fill_gap: (start_time: number) => void;
+    // FILL A GAP — CARRIES THE WHOLE FREE WINDOW SO THE AI SHEET CAN TARGET IT.
+    on_fill_gap: (start_time: number, gap_end: number) => void;
     on_add_first: () => void;
     on_drag_state: (active: boolean) => void;
   }
@@ -536,7 +537,12 @@ export const TimelineCanvas = forwardRef<
                   )}
                   {free_min >= GAP_THRESHOLD_MIN && (
                     <Pressable
-                      onPress={() => on_fill_gap(snap_time(seg.from_min + (seg.leg?.duration_min ?? 0)))}
+                      onPress={() =>
+                        on_fill_gap(
+                          snap_time(seg.from_min + (seg.leg?.duration_min ?? 0)),
+                          seg.to_min,
+                        )
+                      }
                       style={styles.gap_pill}>
                       <Text style={styles.gap_free}>{fmt_duration(free_min)} free</Text>
                       <MaterialCommunityIcons name="creation" size={12} color={color.brand} />

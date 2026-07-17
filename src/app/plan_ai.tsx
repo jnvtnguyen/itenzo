@@ -10,7 +10,9 @@ import { TripSetupFields, is_valid_iso_date } from '@/components/trip_setup_fiel
 import { Wordmark } from '@/components/wordmark';
 import { add_days } from '@/model/time';
 import type { Preferences } from '@/model/types';
+import { llm_is_live } from '@/services/llm';
 import type { CityResult } from '@/services/places_provider';
+import { generate_trip_draft } from '@/services/trip_generator';
 import { use_trip_store } from '@/store/trip_store';
 import { color, hairline_width, radius, space } from '@/theme/tokens';
 
@@ -39,12 +41,14 @@ function default_start_date(): string {
   return `${d.getFullYear()}-${m}-${dd}`;
 }
 
-// THE "PLAN IT FOR ME" DOOR (PLAN_IT_FOR_ME MOCKUP). THE DRAFT GENERATOR IS THE
-// WEEK-6 AI LAYER; TODAY THIS SAVES TASTES AND OPENS THE (EMPTY) TIMELINE —
-// SAME MANUAL PRIMITIVES THE GENERATOR WILL WRITE THROUGH LATER.
+// THE "PLAN IT FOR ME" DOOR (§3.3 DOOR 3): TASTES IN, FULL DRAFT OUT. THE
+// GENERATOR PROPOSES SEARCH INTENTS, REAL PLACES RESOLVE THROUGH THE PLACES
+// PROVIDER, AND EVERY BLOCK LANDS VIA THE SAME STORE PRIMITIVES A THUMB USES.
+// WITHOUT AN OPENROUTER KEY IT STILL CREATES THE (EMPTY) TRIP.
 export default function PlanAiScreen() {
   const insets = useSafeAreaInsets();
   const create_trip = use_trip_store((s) => s.create_trip);
+  const [generating, set_generating] = useState(false);
 
   const [title, set_title] = useState('');
   const [destination, set_destination] = useState('');
@@ -62,7 +66,7 @@ export default function PlanAiScreen() {
   const toggle_interest = (key: string) =>
     set_interests((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
 
-  const handle_create = () => {
+  const handle_create = async () => {
     const trip_id = create_trip({
       title: resolved_title,
       destination: destination.trim(),
@@ -72,6 +76,41 @@ export default function PlanAiScreen() {
       travelers,
       preferences: { pace, budget_tier, interests },
     });
+
+    if (llm_is_live) {
+      set_generating(true);
+      const trip = use_trip_store.getState().trips.find((t) => t.id === trip_id);
+      if (trip) {
+        const draft = await generate_trip_draft({
+          destination: trip.destination || resolved_title,
+          anchor: trip.anchor,
+          days: trip.days.map((d) => ({ id: d.id, date: d.date })),
+          travelers: trip.travelers,
+          preferences: trip.preferences,
+        });
+        // APPLY THROUGH THE ORDINARY PRIMITIVES — EVERY GENERATED BLOCK IS
+        // EDITABLE, DRAGGABLE, AND UNDOABLE LIKE ANY MANUAL ONE.
+        if (draft) {
+          const store = use_trip_store.getState();
+          for (const gen_day of draft) {
+            if (gen_day.theme) store.set_day_theme(trip_id, gen_day.day_id, gen_day.theme);
+            for (const b of gen_day.blocks) {
+              store.add_block(trip_id, gen_day.day_id, {
+                block_type: b.block_type,
+                title: b.title,
+                start_time: b.start_time,
+                duration_min: b.duration_min,
+                place: b.place,
+                source: 'ai_suggested',
+              });
+            }
+          }
+        }
+      }
+      set_generating(false);
+    }
+    // A FAILED OR KEYLESS DRAFT STILL LANDS ON THE (EMPTY) TIMELINE — THE
+    // MANUAL TOOLKIT IS ALWAYS THE FLOOR.
     router.replace({ pathname: '/trip/[trip_id]', params: { trip_id } });
   };
 
@@ -165,15 +204,19 @@ export default function PlanAiScreen() {
         </View>
 
         <Pressable
-          disabled={!can_create}
+          disabled={!can_create || generating}
           onPress={handle_create}
-          style={[styles.cta, !can_create && { opacity: 0.4 }]}>
+          style={[styles.cta, (!can_create || generating) && { opacity: 0.4 }]}>
           <MaterialCommunityIcons name="creation" size={15} color={color.white} />
           <Text style={styles.cta_label}>
-            Draft my trip
+            {generating ? 'Drafting your trip…' : 'Draft my trip'}
           </Text>
         </Pressable>
-        <Text style={styles.footnote}>Every block stays fully editable</Text>
+        <Text style={styles.footnote}>
+          {generating
+            ? 'Finding real places for each day — about half a minute'
+            : 'Every block stays fully editable'}
+        </Text>
       </View>
     </ScrollView>
   );

@@ -10,6 +10,7 @@ import {
   TextInput as NativeTextInput,
   type ScrollView,
 } from 'react-native';
+import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
 // LIVE KEYBOARD HEIGHT (0 WHEN HIDDEN). SHEETS ADD THIS AS BOTTOM PADDING ON
 // THEIR FIELD SCROLL AREAS SO *EVERY* CARD — INCLUDING THE LAST ONE — HAS
@@ -79,4 +80,19 @@ export function use_keyboard_reveal() {
     },
   });
   return { keyboard_height, fields_ref, track_scroll, field_props };
+}
+
+// SMOOTH SCROLL-RANGE SPACER — RENDER AS THE LAST CHILD OF A SHEET'S FIELDS
+// SCROLL CONTENT. WHEN THE CONTENT IS SHORTER THAN THE SCROLL AREA'S HEIGHT
+// CAP, SNAPPING contentContainer PADDING IN MADE THE WHOLE SHEET JUMP TALLER
+// THE INSTANT THE KEYBOARD APPEARED; THE SPACER GROWS IN STEP WITH THE
+// KEYBOARD ANIMATION INSTEAD, THEN THE REVEAL SCROLL GLIDES ON TOP.
+export function KeyboardSpacer({ extra = 24 }: { extra?: number }) {
+  const keyboard_height = use_keyboard_height();
+  const h = useSharedValue(0);
+  useEffect(() => {
+    h.value = withTiming(keyboard_height > 0 ? keyboard_height + extra : 0, { duration: 220 });
+  }, [keyboard_height, extra, h]);
+  const style = useAnimatedStyle(() => ({ height: h.value }));
+  return <Animated.View style={style} />;
 }

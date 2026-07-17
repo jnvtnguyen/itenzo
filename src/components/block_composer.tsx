@@ -283,6 +283,15 @@ function ComposerForm({
     }, 220);
   };
 
+  // A PLACE PROVABLY CLOSED ON THIS WHOLE DAY ("MONDAYS MUSEUMS ARE CLOSED")
+  // NEVER SHOWS IN BROWSE — WRONG *TIME* IS FINE (THE CONFLICT FIX HANDLES
+  // IT), WRONG *DAY* ISN'T. UNKNOWN HOURS PASS THROUGH.
+  const open_on_day = (p: Place): boolean => {
+    const weekly = p.hours?.weekly;
+    if (!weekly) return true;
+    return (weekly[new Date(`${day.date}T12:00:00`).getDay()] ?? []).length > 0;
+  };
+
   const toggle_category = async (cat: PlaceCategory) => {
     // BROWSING IS THE END OF TYPING — PUT THE KEYBOARD AWAY SO THE RESULT
     // LIST ISN'T HIDING BEHIND IT.
@@ -302,7 +311,7 @@ function ComposerForm({
       limit: 8,
     });
     if (seq !== browse_seq.current) return;
-    set_browse_results(results);
+    set_browse_results(results.filter(open_on_day));
     set_browse_loading(false);
   };
 

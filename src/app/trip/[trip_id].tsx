@@ -5,6 +5,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 import Animated, { useAnimatedStyle, useSharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AiSheet } from '@/components/ai_sheet';
 import { BackButton } from '@/components/back_button';
 import { BlockComposer, type ComposerResult } from '@/components/block_composer';
 import { BottomBar } from '@/components/bottom_bar';
@@ -19,7 +20,9 @@ import { Wordmark } from '@/components/wordmark';
 import { StatusChip } from '@/components/chip';
 import { fmt_date_range, fmt_duration, snap_time } from '@/model/time';
 import type { Block, BlockType, Day, ShelfItem } from '@/model/types';
+import type { SuggestContext, SuggestionCard } from '@/services/ai_suggest';
 import { day_pacing, decorate_day, resolve_fix_start } from '@/services/feasibility';
+import { llm_is_live } from '@/services/llm';
 import { use_trip, use_trip_store } from '@/store/trip_store';
 import { color, font, hairline_width, radius, space } from '@/theme/tokens';
 
@@ -63,6 +66,14 @@ export default function TripScreen() {
   const [settings_open, set_settings_open] = useState(false);
   // BUMPED ON EVERY OPEN SO THE SETTINGS FORM REMOUNTS WITH FRESH STATE.
   const [settings_seq, set_settings_seq] = useState(0);
+  // AI SHEET (§3.2): GAP SUGGESTIONS AND CONVERSATIONAL ASKS. THE REQUEST
+  // SURVIVES CLOSE (ONLY ai_open FLIPS) SO THE SHEET'S CONTENT OUTLIVES THE
+  // FADE-OUT INSTEAD OF VANISHING A FRAME EARLY.
+  const [ai_open, set_ai_open] = useState(false);
+  const [ai_seq, set_ai_seq] = useState(0);
+  const [ai_request, set_ai_request] = useState<
+    { mode: 'gap'; gap: { from_min: number; to_min: number } } | { mode: 'ask' } | null
+  >(null);
   const [shelf_drag_item, set_shelf_drag_item] = useState<ShelfItem | null>(null);
   const [shelf_preview, set_shelf_preview] = useState<
     { start_time: number; duration_min: number; title: string; block_type: BlockType } | null
@@ -121,6 +132,58 @@ export default function TripScreen() {
   const pacing = day_pacing(display_blocks);
 
   const close_composer = () => set_composer(null);
+
+  const open_ai = (
+    request: { mode: 'gap'; gap: { from_min: number; to_min: number } } | { mode: 'ask' },
+  ) => {
+    set_ai_seq((s) => s + 1);
+    set_ai_request(request);
+    set_ai_open(true);
+  };
+
+  // WHERE THE TRAVELER WILL BE AROUND A GIVEN TIME — THE PROXIMITY ANCHOR FOR
+  // AI PLACE SEARCHES. NEAREST-IN-TIME PLACED BLOCK, ELSE THE TRIP CITY.
+  const anchor_near = (min: number) => {
+    let best: { coords: NonNullable<Block['place']>['coords']; gap: number } | null = null;
+    for (const b of day.blocks) {
+      if (!b.place?.coords) continue;
+      const gap = Math.abs(b.start_time - min);
+      if (!best || gap < best.gap) best = { coords: b.place.coords, gap };
+    }
+    return best?.coords ?? trip.anchor;
+  };
+
+  const ai_gap = ai_request?.mode === 'gap' ? ai_request.gap : undefined;
+  const ai_ctx: SuggestContext = {
+    destination: trip.destination,
+    day_date: day.date,
+    blocks: display_blocks,
+    anchor: anchor_near(ai_gap?.from_min ?? 720),
+    gap: ai_gap,
+    preferences: trip.preferences,
+    travelers: trip.travelers,
+  };
+
+  const handle_ai_add = (card: SuggestionCard) => {
+    store.add_block(trip.id, day.id, {
+      block_type: card.block_type,
+      title: card.place.name,
+      start_time: card.start_time,
+      duration_min: card.duration_min,
+      place: card.place,
+      source: 'ai_suggested',
+    });
+    set_ai_open(false);
+  };
+
+  const handle_ai_shelve = (card: SuggestionCard) => {
+    store.add_shelf_item(trip.id, {
+      title: card.place.name,
+      block_type: card.block_type,
+      place: card.place,
+      typical_duration_min: card.duration_min,
+    });
+  };
 
   // ONE-TAP CONFLICT FIX: SHIFT THE BLOCK TO THE ENGINE'S SUGGESTED START,
   // PUSHING FOLLOWERS OUT OF THE WAY — SAME PRIMITIVE AS A DRAG, SO UNDO WORKS.
@@ -324,7 +387,7 @@ export default function TripScreen() {
       </View>
 
       <View style={styles.day_header}>
-        <Text style={styles.day_eyebrow}>
+        <Text numberOfLines={1} style={styles.day_eyebrow}>
           Day {day_index + 1}
           {day.theme_label ? ` · ${day.theme_label}` : ''}
         </Text>
@@ -375,7 +438,14 @@ export default function TripScreen() {
           on_fix_block={handle_fix_block}
           on_change_leg_mode={handle_change_leg_mode}
           on_commit_times={(updates) => store.set_day_times(trip.id, day.id, updates)}
-          on_fill_gap={(start_time) => open_composer({ mode: 'add', default_start: start_time })}
+          // THE GAP BUTTON (§3.2): AI SUGGESTIONS FOR THAT WINDOW WHEN A KEY
+          // IS CONFIGURED; THE MANUAL COMPOSER OTHERWISE (AND ALWAYS ONE TAP
+          // AWAY INSIDE THE SHEET).
+          on_fill_gap={(start_time, gap_end) =>
+            llm_is_live
+              ? open_ai({ mode: 'gap', gap: { from_min: start_time, to_min: gap_end } })
+              : open_composer({ mode: 'add', default_start: start_time })
+          }
           on_add_first={() => open_composer({ mode: 'add', default_start: DEFAULT_DAY_START })}
           on_drag_state={() => {}}
         />
@@ -400,6 +470,7 @@ export default function TripScreen() {
 
       <BottomBar
         on_quick_add={() => open_composer({ mode: 'add', default_start: next_free_start(day) })}
+        on_ask={() => open_ai({ mode: 'ask' })}
       />
 
       {/* THE FINGER GHOST ONLY SHOWS OFF-CANVAS — ONCE THE TIMELINE PREVIEWS
@@ -467,6 +538,27 @@ export default function TripScreen() {
         }
       />
 
+      {/* MOUNTED ONLY ONCE A REQUEST EXISTS — THE SHEET FETCHES ON MOUNT, AND
+          THE REQUEST SURVIVING CLOSE KEEPS IT RENDERED THROUGH THE FADE. */}
+      {ai_request != null && (
+      <AiSheet
+        visible={ai_open}
+        instance_key={ai_seq}
+        mode={ai_request.mode}
+        ctx={ai_ctx}
+        on_close={() => set_ai_open(false)}
+        on_add={handle_ai_add}
+        on_shelve={handle_ai_shelve}
+        on_manual={() => {
+          set_ai_open(false);
+          open_composer({
+            mode: 'add',
+            default_start: ai_gap?.from_min ?? next_free_start(day),
+          });
+        }}
+      />
+      )}
+
       <TripSettingsSheet
         trip={trip}
         visible={settings_open}
@@ -500,11 +592,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.gutter,
     paddingBottom: 6,
   },
+  // flex + numberOfLines: A LONG AI DAY THEME TRUNCATES INSTEAD OF SMUSHING
+  // THE STATS AND TOGGLES ON THE RIGHT.
   day_eyebrow: {
+    flex: 1,
     fontSize: 11,
     color: color.brand_text_strong,
     letterSpacing: 1,
     textTransform: 'uppercase',
+    marginRight: 10,
   },
   walk_total: { fontSize: 11, color: color.ink_muted },
   day_header_right: { flexDirection: 'row', alignItems: 'center', gap: 10 },

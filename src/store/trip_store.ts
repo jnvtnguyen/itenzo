@@ -2,7 +2,7 @@ import { create, type StateCreator } from 'zustand';
 import { createJSONStorage, persist, type StateStorage } from 'zustand/middleware';
 
 import { add_days, days_between } from '@/model/time';
-import type { Block, BlockType, Preferences, ShelfItem, Trip } from '@/model/types';
+import type { Block, BlockSource, BlockType, Preferences, ShelfItem, Trip } from '@/model/types';
 
 // THE BOSTON DEMO TRIP SEEDS ONLY WHEN EXPLICITLY REQUESTED (THE HEADLESS
 // SUITE EXPORTS WITH EXPO_PUBLIC_SEED_DEMO=1) — REAL SESSIONS START EMPTY AND
@@ -36,6 +36,8 @@ export interface NewBlockInput {
   is_locked?: boolean;
   booking?: Block['booking'];
   cost?: number;
+  // AI-ADDED BLOCKS CARRY THEIR PROVENANCE (§2.1); DEFAULTS TO manual.
+  source?: BlockSource;
 }
 
 interface TripStore {
@@ -58,6 +60,8 @@ interface TripStore {
   ): void;
   delete_trip(trip_id: string): void;
   add_block(trip_id: string, day_id: string, input: NewBlockInput): string;
+  // AI GENERATION LABELS DAYS ("Old Town & Harbor") — AN ORDINARY UNDOABLE EDIT.
+  set_day_theme(trip_id: string, day_id: string, theme_label: string): void;
   update_block(trip_id: string, day_id: string, block_id: string, patch: Partial<Block>): void;
   delete_block(trip_id: string, day_id: string, block_id: string): void;
   duplicate_block(trip_id: string, day_id: string, block_id: string): void;
@@ -211,7 +215,7 @@ const store_definition: StateCreator<TripStore> = (set) => ({
             notes: input.notes,
             booking: input.booking,
             cost: input.cost,
-            source: 'manual',
+            source: input.source ?? 'manual',
             is_locked: input.is_locked ?? false,
             // A CONFIRMED BOOKING EARNS THE GREEN "BOOKED" CHIP (§3.0 STATUS CHIPS).
             meta: input.booking?.confirmation_number
@@ -222,6 +226,16 @@ const store_definition: StateCreator<TripStore> = (set) => ({
       }),
     );
     return block_id;
+  },
+
+  set_day_theme(trip_id, day_id, theme_label) {
+    set((state) =>
+      mutate(state, (trips) => {
+        const day = find_day(trips, trip_id, day_id);
+        if (!day) return;
+        day.theme_label = theme_label;
+      }),
+    );
   },
 
   update_block(trip_id, day_id, block_id, patch) {

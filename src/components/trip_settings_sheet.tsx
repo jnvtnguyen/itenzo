@@ -6,7 +6,7 @@ import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { FieldCard, Text, TextInput } from '@/components/text';
-import { use_keyboard_reveal } from '@/components/use_keyboard_height';
+import { KeyboardSpacer, use_keyboard_reveal } from '@/components/use_keyboard_height';
 import type { Trip } from '@/model/types';
 import { places_provider, type CityResult } from '@/services/places_provider';
 import { color, hairline_width, radius, space } from '@/theme/tokens';
@@ -76,9 +76,10 @@ function SettingsForm({
   const [confirm_delete, set_confirm_delete] = useState(false);
 
   // KEYBOARD STORY (SHARED SHEET PATTERN — SEE use_keyboard_reveal): THE
-  // SHEET NEVER MOVES; THE FIELD AREA GAINS SCROLL RANGE AND FOCUSED INPUTS
-  // SLIDE JUST CLEAR OF THE KEYBOARD.
-  const { keyboard_height, fields_ref, track_scroll, field_props } = use_keyboard_reveal();
+  // SHEET NEVER MOVES; THE FIELD AREA GAINS SCROLL RANGE (VIA THE ANIMATED
+  // KeyboardSpacer — THIS SHEET'S CONTENT IS SHORT, SO INSTANT PADDING MADE
+  // IT JUMP) AND FOCUSED INPUTS SLIDE JUST CLEAR OF THE KEYBOARD.
+  const { fields_ref, track_scroll, field_props } = use_keyboard_reveal();
 
   const city_timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const city_seq = useRef(0);
@@ -169,7 +170,6 @@ function SettingsForm({
             onScroll={track_scroll}
             scrollEventThrottle={16}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={keyboard_height > 0 && { paddingBottom: keyboard_height + 24 }}
             style={styles.fields_scroll}>
           <FieldCard {...field_props('title')} style={styles.field_card}>
             <Text style={styles.field_eyebrow}>TITLE</Text>
@@ -232,6 +232,7 @@ function SettingsForm({
               </Pressable>
             </View>
           </View>
+          <KeyboardSpacer />
           </ScrollView>
 
           <Pressable

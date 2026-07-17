@@ -25,6 +25,9 @@ import { block_edge_color, color, hairline_width, radius } from '@/theme/tokens'
 
 const SNAP_MIN = 15;
 const LONG_PRESS_MS = 200;
+// NATIVE RESIZE NEEDS ITS OWN SHORT HOLD BEFORE THE PULL ENGAGES — WITHOUT
+// IT, SCROLL SWIPES THAT HAPPEN TO START ON A GRIP RANDOMLY RESIZED BLOCKS.
+const RESIZE_HOLD_MS = 160;
 const MIN_DURATION = MIN_BLOCK_MIN;
 
 // HEIGHT BREAKPOINTS FOR CONTENT DENSITY — SHORT BLOCKS COLLAPSE TO ONE LINE
@@ -162,12 +165,22 @@ export function BlockCard({
   // HOLD-TO-LIFT TIMER: MANUAL ACTIVATION ONLY FIRES ON MOVEMENT, SO A PLAIN
   // TIMER PROVIDES THE "ARMED" INDICATOR WHILE THE FINGER IS STILL. THE MOVE
   // LIFT ONLY ARMS FOR GRABS THAT CAN BECOME MOVES — A NATIVE STRIP GRAB STAYS
-  // A RESIZE, SO THE TILT INDICATOR WOULD LIE.
+  // A RESIZE, SO THE TILT INDICATOR WOULD LIE. STRIP GRABS ARM THEIR OWN
+  // "ABOUT TO RESIZE" SIGNAL INSTEAD (BRAND BORDER + GROWN GRIP).
+  const [resize_armed, set_resize_armed] = useState(false);
   const lift_timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const begin_touch = (arm_lift: boolean) => {
+  const resize_timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const begin_touch = (arm_lift: boolean, arm_resize: boolean) => {
     // A FRESH TOUCH STARTS AS A POTENTIAL TAP AGAIN.
     press_consumed.current = false;
     if (lift_timer.current) clearTimeout(lift_timer.current);
+    if (resize_timer.current) clearTimeout(resize_timer.current);
+    if (arm_resize) {
+      resize_timer.current = setTimeout(() => {
+        press_consumed.current = true;
+        set_resize_armed(true);
+      }, RESIZE_HOLD_MS);
+    }
     if (!arm_lift) return;
     lift_timer.current = setTimeout(() => {
       press_consumed.current = true;
@@ -180,11 +193,17 @@ export function BlockCard({
       clearTimeout(lift_timer.current);
       lift_timer.current = null;
     }
+    if (resize_timer.current) {
+      clearTimeout(resize_timer.current);
+      resize_timer.current = null;
+    }
     set_lift_ready(false);
+    set_resize_armed(false);
   };
   useEffect(
     () => () => {
       if (lift_timer.current) clearTimeout(lift_timer.current);
+      if (resize_timer.current) clearTimeout(resize_timer.current);
     },
     [],
   );
@@ -243,6 +262,12 @@ export function BlockCard({
   const MODE_RESIZE = 1;
   const mode = useSharedValue(MODE_MOVE);
   const pressed_at = useSharedValue(0);
+  // TOUCH-DOWN POSITION — MOVEMENT BEFORE THE HOLD MATURES MEANS SCROLL
+  // INTENT, AND THE PAN MUST FAIL FAST SO THE TIMELINE SCROLLS.
+  const down_x = useSharedValue(0);
+  const down_y = useSharedValue(0);
+  // ROOMY ENOUGH THAT FINGER JITTER DURING A DELIBERATE HOLD DOESN'T FAIL IT.
+  const SCROLL_SLOP_PX = 14;
   // THE RESIZE STRIP SHRINKS ON SHORT CARDS SO MOST OF THE CARD STAYS
   // GRABBABLE. FINGERS NEED A MUCH TALLER TARGET THAN A MOUSE — AND A VISIBLE
   // GRIP (BELOW) TO AIM AT.
@@ -330,19 +355,43 @@ export function BlockCard({
     .onTouchesDown((e) => {
       const touch = e.allTouches[0];
       mode.value = touch && touch.y >= height - resize_strip ? MODE_RESIZE : MODE_MOVE;
+      down_x.value = touch?.x ?? 0;
+      down_y.value = touch?.y ?? 0;
       // eslint-disable-next-line react-hooks/purity
       pressed_at.value = Date.now();
-      runOnJS(begin_touch)(hold_converts_to_move || mode.value === MODE_MOVE);
+      runOnJS(begin_touch)(
+        hold_converts_to_move || mode.value === MODE_MOVE,
+        // NATIVE STRIP GRABS ARM THE RESIZE SIGNAL.
+        !hold_converts_to_move && mode.value === MODE_RESIZE,
+      );
     })
-    .onTouchesMove((_e, manager) => {
+    .onTouchesMove((e, manager) => {
       // eslint-disable-next-line react-hooks/purity
-      const held = Date.now() - pressed_at.value >= LONG_PRESS_MS;
+      const now = Date.now();
+      const held = now - pressed_at.value >= LONG_PRESS_MS;
       // WEB ONLY: A MATURED HOLD *BEFORE ACTIVATION* MEANS MOVE INTENT, EVEN
       // FROM THE RESIZE STRIP — BUT AN ACTIVE RESIZE MUST NEVER FLIP
       // MID-GESTURE. ON TOUCH DEVICES STRIP GRABS STAY RESIZES (SEE ABOVE).
       if (hold_converts_to_move && gesture_on.value === 0 && mode.value === MODE_RESIZE && held)
         mode.value = MODE_MOVE;
-      if (mode.value === MODE_RESIZE || held) manager.activate();
+      // NATIVE RESIZE ONLY ENGAGES AFTER ITS SHORT HOLD — A QUICK SWIPE THAT
+      // HAPPENS TO START ON THE GRIP STAYS A SCROLL. WEB (MOUSE) IS PRECISE
+      // AND KEEPS THE INSTANT PULL.
+      const resize_ready = hold_converts_to_move || now - pressed_at.value >= RESIZE_HOLD_MS;
+      const engage = (mode.value === MODE_RESIZE && resize_ready) || held;
+      if (engage) {
+        manager.activate();
+        return;
+      }
+      // REAL MOVEMENT BEFORE ANY HOLD MATURED = A SCROLL. FAIL EXPLICITLY SO
+      // THE TIMELINE'S ScrollView TAKES THE TOUCH IMMEDIATELY — A PAN LEFT
+      // DANGLING IN "BEGAN" KEPT BLOCKING SCROLLS THAT STARTED ON A CARD.
+      const touch = e.allTouches[0];
+      if (touch && gesture_on.value === 0) {
+        const dx = touch.x - down_x.value;
+        const dy = touch.y - down_y.value;
+        if (dx * dx + dy * dy > SCROLL_SLOP_PX * SCROLL_SLOP_PX) manager.fail();
+      }
     })
     // start_gesture WRITES THE press_consumed REF, BUT ONLY AT EVENT TIME.
     // eslint-disable-next-line react-hooks/refs
@@ -449,10 +498,10 @@ export function BlockCard({
           // LIVE MID-DRAG WARNING, WHERE LOUD IS THE POINT.
           conflict != null && !active && styles.card_conflict_rest,
           (dragging || lift_ready) && styles.card_lifted,
-          resizing && styles.card_resizing,
+          (resizing || resize_armed) && styles.card_resizing,
           // THE LIVE WARNING OUTRANKS THE LIFTED BRAND TINT.
           active && preview_conflict != null && styles.card_conflict,
-          (active || lift_ready) && styles.card_active_z,
+          (active || lift_ready || resize_armed) && styles.card_active_z,
           animated_style,
         ]}>
         <View style={[styles.edge, { backgroundColor: edge_color }]} />
@@ -532,7 +581,7 @@ export function BlockCard({
 
         {!block.is_locked && (
           <View style={styles.resize_zone} pointerEvents="none">
-            <View style={[styles.resize_bar, resizing && styles.resize_bar_active]} />
+            <View style={[styles.resize_bar, (resizing || resize_armed) && styles.resize_bar_active]} />
           </View>
         )}
       </Animated.View>
